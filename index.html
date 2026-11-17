@@ -76,7 +76,7 @@ header .title { display: grid; gap: 6px; min-width: 0; }
 .res { font-weight: 600; } .res.win { color: var(--ok); } .res.loss { color: var(--c-str); }
 td.sub.read-yes { color: var(--ok); } td.sub.read-no { color: var(--c-str); font-weight: 600; }
 td.sub[title] { cursor: help; }
-td.sub, .hero .sub { color: var(--muted); font-size: 13px; font-weight: 400; }
+td.sub, .hero .sub, .chip .sub { color: var(--muted); font-size: 13px; font-weight: 400; }
 td a { color: inherit; }
 .log time { font: 500 12px var(--mono); color: var(--muted); margin-right: 10px; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
@@ -263,6 +263,7 @@ code { font: 500 13px var(--mono); overflow-wrap: anywhere; }
         <h3>What the tracker shows</h3>
         <ul>
           <li><b>Checks:</b> the server's state. <span class="chip ready">Gold</span> purchases have all their components unlocked, so buying them counts. <span class="chip done">Green</span> checks are already sent.</li>
+          <li><b>Challenges and quests</b> (apworlds that have them): challenges are done in one match, any hero. Quests add up over the seed; their progress comes from the client save, or is estimated from OpenDota.</li>
           <li><b>Wins and heroes won:</b> only the client knows them. Without its save, the tracker estimates them from OpenDota (matches with an unlocked hero). Load the save in Settings for the exact numbers.</li>
           <li><b>Read by the client</b> (Matches tab): deduced from the checks done on the server. "✗ not read" means a stat check of that match is still to do. "?" usually means OpenDota hasn't parsed that match yet: the tracker only reads OpenDota, it never asks for a parse.</li>
           <li>The tracker connects to the server in read-only mode: it never sends checks and doesn't count as you playing.</li>
@@ -275,6 +276,7 @@ code { font: 500 13px var(--mono); overflow-wrap: anywhere; }
   <noscript><p class="status err">This tracker needs JavaScript: allow it for this site, then reload the page.</p></noscript>
 
   <div id="app" hidden>
+  <p class="banner" id="save-note" hidden></p>
   <div class="tabs" role="tablist" aria-label="Views">
     <button id="tab-tracker" type="button" role="tab" aria-selected="true" aria-controls="panel-tracker">Tracker</button>
     <button id="tab-items" type="button" role="tab" aria-selected="false" aria-controls="panel-items">Components</button>
@@ -290,8 +292,6 @@ code { font: 500 13px var(--mono); overflow-wrap: anywhere; }
 
   <section id="heroes">
     <div class="sec-head"><h2>Heroes</h2><span class="eyebrow" id="heroes-count"></span></div>
-    <p class="note">Click a column title to sort, and a trait (group, attribute, attack, legs, role) to keep only the heroes that have it. You can pick several values: within a trait, any of them matches. Heroes not unlocked yet form a last group, "Locked", hidden until you pick it.</p>
-    <p class="banner" id="save-note" hidden></p>
     <div class="hfilters" id="hfilters" role="group" aria-label="Hero filters"></div>
     <div class="tablebox"><table>
       <thead><tr id="hero-head"></tr></thead>
@@ -303,8 +303,8 @@ code { font: 500 13px var(--mono); overflow-wrap: anywhere; }
     <input id="q" type="search" placeholder="Search a hero or a check…" aria-label="Search a hero or a check">
     <div class="toggle" role="group" aria-label="Checks shown">
       <button data-mode="all" type="button" aria-pressed="false" title="All checks">All</button>
-      <button data-mode="on" type="button" aria-pressed="false" title="Purchases you can make, done checks included">Unlocked</button>
-      <button data-mode="todo" type="button" aria-pressed="true" title="Unlocked, without the checks already sent">To do</button>
+      <button data-mode="on" type="button" aria-pressed="false" title="Checks you can do now, done ones included">Unlocked</button>
+      <button data-mode="todo" type="button" aria-pressed="true" title="Checks you can do now, without the ones already sent">To do</button>
     </div>
   </div>
 
@@ -325,7 +325,6 @@ code { font: 500 13px var(--mono); overflow-wrap: anywhere; }
   <div class="panel" id="panel-items" role="tabpanel" aria-labelledby="tab-items" hidden>
     <section id="items">
       <div class="sec-head"><h2>Components</h2><span class="eyebrow" id="items-count"></span></div>
-      <p class="note">The basic items you must receive before buying them counts. Built items need all their components.</p>
       <div class="chips" id="components"></div>
     </section>
   </div>
@@ -334,7 +333,6 @@ code { font: 500 13px var(--mono); overflow-wrap: anywhere; }
     <div class="stats" id="game-stats"></div>
     <section>
       <div class="sec-head"><h2>Match history</h2><span class="eyebrow" id="games-count"></span></div>
-      <p class="note" id="games-note"></p>
       <div class="tablebox"><table>
         <thead><tr><th scope="col">Date</th><th scope="col">Hero</th><th scope="col">Result</th><th scope="col" class="num">K / D / A</th><th scope="col" class="num">Duration</th><th scope="col">Read by the client</th><th scope="col">Details</th></tr></thead>
         <tbody id="game-rows"></tbody>
@@ -524,10 +522,10 @@ async function opendotaMatches(steam, since) {
   return matches.filter(m => m.start_time >= from).sort((a, b) => a.start_time - b.start_time);
 }
 
-// Stats and purchases of each match, as the client reads them; kept once OpenDota has parsed the match
-const DETAILS_KEY = "dota-ap-tracker:matches";
+// Stats, purchases and challenge data of each match, as the client reads them; kept once OpenDota has parsed the match
+const DETAILS_KEY = "dota-ap-tracker:matches:v4";
 const PENDING_KEY = "dota-ap-tracker:unparsed";
-async function matchDetails(ids, steam) {
+async function matchDetails(ids, steam, damageTypes) {
   const cache = store.get(DETAILS_KEY) || {};
   // Matches OpenDota hasn't parsed yet often stay that way: retry them every 10 minutes, not on every load
   const pending = store.get(PENDING_KEY) || {};
@@ -539,8 +537,21 @@ async function matchDetails(ids, steam) {
         const m = await getJSON(`${OPENDOTA}/matches/${id}`);
         const me = (m.players || []).find(p => p.account_id === steam);
         if (!me || me.purchase == null) { pending[id] = Date.now(); return; }  // not parsed by OpenDota yet
+        const objectives = m.objectives || [], players = m.players || [];
+        const myTeam = me.player_slot < 128 ? 2 : 3;  // objectives use 2 for Radiant, 3 for Dire
         cache[id] = { kills: me.kills, assists: me.assists, last_hits: me.last_hits, denies: me.denies,
-                      dewards: (me.observer_kills || 0) + (me.sentry_kills || 0), purchase: Object.keys(me.purchase).sort() };
+                      dewards: (me.observer_kills || 0) + (me.sentry_kills || 0), purchase: Object.keys(me.purchase).sort(),
+                      // Same fields as challenge_data() in worlds/dota_2/dota_api.py
+                      first_blood: !!me.firstblood_claimed, courier_kills: me.courier_kills || 0,
+                      runes: Object.fromEntries(Object.entries(me.runes || {}).map(([k, v]) => [String(k), v])),
+                      buybacks: me.buyback_count || (me.buyback_log || []).length,
+                      aegis: objectives.some(o => o.type === "CHAT_MESSAGE_AEGIS" && o.player_slot === me.player_slot),
+                      position: me.position_est || 0, duration: m.duration || 0,
+                      all_players_stayed: m.human_players === 10 && players.length === 10 && players.every(p => !p.leaver_status),
+                      team_roshan_kills: objectives.filter(o => o.type === "CHAT_MESSAGE_ROSHAN_KILL" && o.team === myTeam).length,
+                      camps_stacked: me.camps_stacked || 0, wards_placed: (me.obs_placed || 0) + (me.sen_placed || 0),
+                      building_damage: me.tower_damage || 0, healing: me.hero_healing || 0, stun_time: Math.round(me.stuns || 0),
+                      ...damageByType(me, damageTypes) };
         delete pending[id];
       } catch (e) {}
     }));
@@ -550,16 +561,75 @@ async function matchDetails(ids, steam) {
   return cache;
 }
 
-// Stat check thresholds of the Dota 2 client (Client.py, check_dota_goals_and_locations)
-const STAT_CHECKS = [["kills", "Get {} Kill(s)", [1, 5, 10]], ["assists", "Get {} Assists", [5, 10, 20]],
-  ["dewards", "Get {} Deward(s)", [1, 3, 7]], ["last_hits", "Get {} Last Hits", [75, 125, 175]], ["denies", "Get {} Denies", [8, 16, 32]]];
+// Physical and magical damage to heroes, and the biggest hit of each type we can be sure of (damage_by_type() in
+// worlds/dota_2/dota_api.py): attacks are physical, pure damage magical, items neither; OpenDota keeps only the biggest
+// hit, so a type's biggest hit is that one, or the best average hit of a source of that type
+function damageByType(me, types) {
+  const kind = src => src == null || src === "null" ? "Physical" : types[src] === "Pure" ? "Magical" : types[src];
+  const inflictors = me.damage_inflictor || {}, hits = me.hero_hits || {};
+  const total = { Physical: 0, Magical: 0 }, best = { Physical: 0, Magical: 0 };
+  Object.entries(inflictors).forEach(([src, dmg]) => {
+    const t = kind(src);
+    if (!(t in total)) return;
+    total[t] += dmg;
+    if (hits[src]) best[t] = Math.max(best[t], Math.floor(dmg / hits[src]));
+  });
+  const big = me.max_hero_hit || {}, t = kind(big.inflictor);
+  if (t in best) best[t] = Math.max(best[t], big.value || 0);
+  return { physical_damage: total.Physical, magical_damage: total.Magical, physical_hit: best.Physical, magical_hit: best.Magical };
+}
+
+// The client's rules, as in worlds/dota_2/challenges.py. Stat and quest checks are named after their threshold
+// ("Get 450 Last Hits", "Stack 10 Camps"): the name templates give the threshold and the match field it's checked on.
+const STAT_NAMES = [["Get {} Kill(s)", "kills"], ["Get {} Assists", "assists"], ["Get {} Deward(s)", "dewards"],
+  ["Get {} Last Hits", "last_hits"], ["Get {} Denies", "denies"], ["Heal {} in a Match", "healing"],
+  ["Deal {} Physical Damage in a Match", "physical_damage"], ["Deal {} Magical Damage in a Match", "magical_damage"],
+  ["Land a {} Physical Hit", "physical_hit"], ["Land a {} Magical Hit", "magical_hit"], ["Stun Enemies for {}s in a Match", "stun_time"]];
+// Quests add up over the seed; the field is also the quest total's key
+const QUEST_NAMES = [["Stack {} Camps", "camps_stacked"], ["Place {} Wards", "wards_placed"], ["Deal {} Building Damage", "building_damage"],
+  ["Heal {} in Total", "healing"], ["Deal {} Physical Damage in Total", "physical_damage"],
+  ["Deal {} Magical Damage in Total", "magical_damage"], ["Stun Enemies for {}s in Total", "stun_time"]];
+const nameRegex = t => new RegExp("^" + t.replace(/[.*+?^$()|[\]\\]/g, "\\$&").replace("{}", "(\\d+)") + "$");
+const STAT_RES = STAT_NAMES.map(([t, field]) => [nameRegex(t), field]);
+const QUEST_RES = QUEST_NAMES.map(([t, field]) => [nameRegex(t), field]);
+// { field, threshold } of a stat or quest check, or null
+function scaleOf(name, res) {
+  for (const [re, field] of res) { const m = name.match(re); if (m) return { field, threshold: +m[1] }; }
+  return null;
+}
+const RUNES = { 0: "Double Damage", 1: "Haste", 2: "Illusion", 3: "Invisibility", 4: "Regeneration",
+  5: "Bounty", 6: "Arcane", 7: "Water", 8: "Wisdom", 9: "Shield" };
+const runeCheck = r => `Pick up ${/^[AEIOU]/.test(r) ? "an" : "a"} ${r} Rune`;
+// Values the win challenges use, from the seed's check_values
+const seedValues = sd => ({ "Short Win Minutes": 30, "Long Win Minutes": 60, "Roshan Kills": 1, ...(sd.check_values || {}) });
+
+// Checks a match sends whatever its result (stats and challenges), among the seed's checks
+function statAndChallengeChecks(d, seedChecks) {
+  const stats = [...seedChecks].filter(name => { const s = scaleOf(name, STAT_RES); return s && d[s.field] >= s.threshold; });
+  if (d.first_blood) stats.push("Get First Blood");
+  if (d.courier_kills > 0) stats.push("Kill a Courier");
+  Object.entries(d.runes || {}).forEach(([k, n]) => { if (n && RUNES[k]) stats.push(runeCheck(RUNES[k])); });
+  if (d.buybacks > 0) stats.push("Use a Buyback");
+  if (d.aegis) stats.push("Pick up the Aegis");
+  return stats;
+}
+function winChallenges(d, values) {
+  const out = [];
+  if (d.position >= 1 && d.position <= 5) out.push(`Win as Position ${d.position}`);
+  // A match ended early by a leaver or with bots doesn't count as a short win
+  if (d.all_players_stayed && d.duration < values["Short Win Minutes"] * 60) out.push("Win a Short Match");
+  if (d.duration >= values["Long Win Minutes"] * 60) out.push("Win a Long Match");
+  if (d.team_roshan_kills >= values["Roshan Kills"]) out.push("Win a Match Where Your Team Took Roshan");
+  return out;
+}
 const ATTR_CHECK = { str: "Win as a Strength Hero", agi: "Win as a Agility Hero", int: "Win as a Intelligence Hero", all: "Win as a Universal Hero" };
 
-// Checks /parse_recent_match would have sent for a match: [stats, everything].
-// Stats don't depend on any unlock; wins and purchases do, so they only serve as proof
-function matchTriggers(game, d, hero, group, shopByKey) {
-  const stats = STAT_CHECKS.flatMap(([k, name, ts]) => ts.filter(t => d[k] >= t).map(t => name.replace("{}", t)));
+// Checks /parse_recent_match would have sent for a match, among this seed's checks: [stats, everything].
+// Stats and challenges don't depend on any unlock; wins and purchases do, so they only serve as proof
+function matchTriggers(game, d, hero, group, shopByKey, values, seedChecks) {
+  const stats = statAndChallengeChecks(d, seedChecks).filter(c => seedChecks.has(c));
   const extra = d.purchase.filter(k => k in shopByKey).map(k => shopByKey[k]);
+  if (game.win) extra.push(...winChallenges(d, values));
   if (game.win && hero) {
     extra.push(group === 0 ? "Win with hero from starting pool" : `Win with Hero from Group ${group}`);
     extra.push(ATTR_CHECK[hero.attr] || "", `Win as a ${hero.attack} Hero`);
@@ -567,7 +637,7 @@ function matchTriggers(game, d, hero, group, shopByKey) {
     if (hero.roles.includes("Carry")) extra.push("Win as a Carry Hero");
     else if (hero.roles.includes("Support")) extra.push("Win as a Support Hero");
   }
-  return [stats, stats.concat(extra)];
+  return [stats, stats.concat(extra.filter(c => seedChecks.has(c)))];
 }
 
 // Whether /parse_recent_match read each match, from what it would have sent and the checks done:
@@ -606,7 +676,10 @@ function stampReceived(cfg, seed, count) {
 // ---------- building the page data ----------
 
 async function loadStatic() {
-  const [heroes, shop] = await Promise.all([getJSON(DATA_URL + "heroes.json"), getJSON(DATA_URL + "dotaShopLocations.json")]);
+  const [heroes, shop, abilities] = await Promise.all([getJSON(DATA_URL + "heroes.json"), getJSON(DATA_URL + "dotaShopLocations.json"),
+    getJSON(OPENDOTA + "/constants/abilities").catch(() => ({}))]);
+  const damageTypes = Object.fromEntries(Object.entries(abilities).filter(([, a]) => ["Magical", "Physical", "Pure"].includes(a.dmg_type))
+    .map(([k, a]) => [k, a.dmg_type]));
   const attrs = {};
   heroes.dota_heroes.forEach(h => {
     attrs[h.localized_name] = { id: h.id, key: h.name.replace("npc_dota_hero_", ""), attr: h.primary_attr, attack: h.attack_type, legs: h.legs, roles: h.roles };
@@ -620,7 +693,7 @@ async function loadStatic() {
     items[it.dname] = { img: CDN + img, internal, req: it.requirements || [] };
     byKey[key] = it.dname;
   });
-  return { attrs, items, byKey };
+  return { attrs, items, byKey, damageTypes };
 }
 
 async function build(cfg, say) {
@@ -641,7 +714,10 @@ async function build(cfg, say) {
   const unlockedKeys = new Set(names.filter(n => n.startsWith("Unlock ")).map(n => n.slice(7)));
   const checked = new Set(c.checked_locations);
   const allLocs = [...new Set([...c.missing_locations, ...c.checked_locations])].sort((a, b) => a - b);
-  const locKind = n => n.startsWith("Win with") ? "hero" : n.startsWith("Win as") || n.startsWith("Get ") ? "match" : "item";
+  const locKind = n => n.startsWith("Win with") ? "hero" : n in S.items ? "item" : scaleOf(n, QUEST_RES) ? "quest"
+    : n.startsWith("Win as a ") || scaleOf(n, STAT_RES) ? "match" : "challenge";
+  const values = seedValues(sd);
+  const seedChecks = new Set(allLocs.map(i => locNames[i]));
 
   // The client save is the reference for progress; it must belong to this seed
   let save = store.get(saveKey(cfg));
@@ -667,6 +743,8 @@ async function build(cfg, say) {
   const steam = steam32(cfg.steam || save?.steamid);
   const since = cfg.since || save?.start_date_local?.slice(0, 10) || "";
   let games = null, gamesError = null, prog = progress;
+  // Quest totals: the client save's, or an estimate from the matches with an unlocked hero
+  let questTotals = save?.quest_totals || null, questSource = questTotals ? "save" : null;
   if (steam && since) {
     say("Reading your matches on OpenDota…");
     try {
@@ -682,20 +760,41 @@ async function build(cfg, say) {
         const wins = games.filter(g => g.open && g.win);
         prog = { source: "opendota", since, wins: wins.length, matches: games.filter(g => g.open).length, unique_won: [...new Set(wins.map(g => g.hero))].sort() };
       }
-      const details = await matchDetails(games.map(g => g.id), steam);
+      const details = await matchDetails(games.map(g => g.id), steam, S.damageTypes);
       const groupOf = Object.fromEntries(heroes.map(h => [h.name, h.group]));
       const shopByKey = Object.fromEntries(Object.entries(S.items).map(([n, it]) => [it.internal, n]));
       const triggers = {};
-      games.forEach(g => { if (details[g.id]) triggers[g.id] = matchTriggers(g, details[g.id], S.attrs[g.hero], groupOf[g.hero], shopByKey); });
+      games.forEach(g => { if (details[g.id]) triggers[g.id] = matchTriggers(g, details[g.id], S.attrs[g.hero], groupOf[g.hero], shopByKey, values, seedChecks); });
+      if (!questTotals) {
+        questTotals = {}; questSource = "opendota";
+        games.filter(g => g.open && details[g.id]).forEach(g => QUEST_NAMES.forEach(([, k]) => { questTotals[k] = (questTotals[k] || 0) + (details[g.id][k] || 0); }));
+      }
       readStatuses(games, triggers, new Set([...checked].map(i => locNames[i])), progress?.submitted);
     } catch (e) { gamesError = "OpenDota unreachable: " + e.message; games = null; }
   }
 
   const heroImg = h => h.key ? `${CDN}/apps/dota2/images/dota_react/heroes/${h.key}.png` : "";
+  // Wins that need a group or a kind of hero you can't play yet, like the apworld's logic (regions.py)
+  const TRAIT = {
+    "Strength": h => h.attr === "str", "Agility": h => h.attr === "agi", "Intelligence": h => h.attr === "int", "Universal": h => h.attr === "all",
+    "Melee": h => h.attack === "Melee", "Ranged": h => h.attack === "Ranged",
+    "0 Legged": h => h.legs === 0, "2 Legged": h => h.legs === 2, "4+ Legged": h => h.legs >= 4,
+    "Carry": h => h.roles.includes("Carry"), "Support": h => h.roles.includes("Support"),
+  };
+  const playable = name => {
+    const group = name.match(/^Win with Hero from Group (\d+)$/);
+    if (group) return heroes.some(h => h.group === +group[1]);
+    const trait = name.match(/^Win as a (.+) Hero$/);
+    if (trait && TRAIT[trait[1]]) return heroes.some(TRAIT[trait[1]]);
+    return true;
+  };
   const check = (name, done) => {
     const ck = { name, kind: locKind(name), done };
     const it = S.items[name];
     if (ck.kind === "item" && it) { ck.img = it.img; ck.ready = it.req.every(r => unlockedKeys.has(r)); }
+    else if (!playable(name)) ck.ready = false;
+    const quest = scaleOf(name, QUEST_RES);
+    if (quest && questTotals) ck.progress = [questTotals[quest.field] || 0, quest.threshold, questSource];
     return ck;
   };
   const componentKeys = Object.keys(dp.item_name_to_id).filter(n => n.startsWith("Unlock ")).map(n => n.slice(7));
@@ -787,8 +886,7 @@ function renderStatic() {
   if (!D.has_steam) say("Add your Steam account ID in Settings to see your wins and matches.");
   else if (!D.games_since) say("Add the seed start date in Settings (or load the client save) to see your wins and matches.");
   else if (!P) say("Progress unavailable: " + (D.games_error || "OpenDota unreachable") + ".");
-  else if (P.source === "opendota") say("Wins estimated from OpenDota (matches with an unlocked hero). The client only counts matches read with /parse_recent_match: /goal is the reference. Load the client save in Settings for exact numbers.");
-  else if (!P.steamid_set) say("No Steam ID set in the client: run /set_player_id once so your matches count.");
+  else if (P.source === "save" && !P.steamid_set) say("No Steam ID set in the client: run /set_player_id once so your matches count.");
   $("log-count").textContent = D.received.length + " items";
   if (D.journal_since) $("log-note").textContent = "When this browser saw the item arrive (to the nearest refresh). Items received before "
     + fmtTime(D.journal_since) + " have no time.";
@@ -901,13 +999,28 @@ function tagCell(k, v, label) {
   td.append(b); return td;
 }
 
+// Match objectives in a readable order: wins by trait, then each stat from its lowest threshold up
+const MATCH_ORDER = ["Strength", "Agility", "Intelligence", "Universal", "Melee", "Ranged", "0 Legged", "2 Legged", "4+ Legged",
+  "Carry", "Support", "Kill", "Assist", "Deward", "Last Hit", "Denies", "Heal", "Physical Damage", "Magical Damage", "Physical Hit", "Magical Hit", "Stun"];
+function matchRank(name) {
+  const i = MATCH_ORDER.findIndex(w => name.includes(w));
+  const n = +(name.match(/\d+/g) || [0]).pop();
+  return [i < 0 ? MATCH_ORDER.length : i, i >= 6 && i <= 8 ? 0 : n];
+}
+function byMatchRank(a, b) {
+  const [x, y] = [matchRank(a.name), matchRank(b.name)];
+  return x[0] - y[0] || x[1] - y[1] || a.name.localeCompare(b.name);
+}
+
 function render() {
   renderHeroes();
-  const kinds = [["hero", "Wins by group"], ["match", "Match objectives"], ["item", "Items to buy"]];
+  const kinds = [["hero", "Wins by group"], ["match", "Match objectives"], ["challenge", "Challenges"], ["quest", "Quests"], ["item", "Items to buy"]];
   const cg = $("check-groups"); cg.replaceChildren();
   kinds.forEach(([k, label]) => {
     // "Unlocked": for purchases, only the ones you can make (and those already done)
-    const list = D.checks.filter(c => c.kind === k && match(c.name) && !(hideDone && c.done) && (!onlyOn || k !== "item" || c.done || c.ready));
+    // "Unlocked": purchases with all their components, and wins with a group or a kind of hero you can play
+    const list = D.checks.filter(c => c.kind === k && match(c.name) && !(hideDone && c.done) && (!onlyOn || c.done || (k === "item" ? c.ready : c.ready !== false)));
+    if (k === "match") list.sort(byMatchRank);
     if (!list.length) return;
     const g = el("div", "group"), h = el("div", "group-head");
     h.append(el("h3", null, label), el("span", "eyebrow", list.filter(c => !c.done).length + " left"));
@@ -920,7 +1033,13 @@ function render() {
       const chip = el(filt ? "button" : "span", "chip" + (c.done ? " done" : "") + (ready ? " ready" : "") + (c.img ? " item" : "") + (filt ? " link" : ""));
       if (filt) { chip.type = "button"; chip.title = "Show the heroes that complete this check"; chip.addEventListener("click", () => showHeroesFor(filt)); }
       if (c.img) { const img = el("img"); img.src = c.img; img.alt = ""; img.loading = "lazy"; img.onerror = () => img.remove(); chip.append(img); }
-      chip.append(c.name); chips.append(chip);
+      chip.append(c.name);
+      if (c.progress && !c.done) {
+        const [have, need, source] = c.progress;
+        chip.append(el("span", "sub", ` ${have.toLocaleString()} / ${need.toLocaleString()}`));
+        chip.title = source === "save" ? "From the client save" : "Estimated from OpenDota (matches with an unlocked hero)";
+      }
+      chips.append(chip);
     });
     g.append(chips); cg.append(g);
   });
@@ -955,9 +1074,6 @@ function renderGames() {
   $("tab-games").textContent = "Matches (" + G.length + ")";
   $("game-stats").replaceChildren(...(G.length ? [stat("Wins", wins.length, G.length, Math.round(100 * wins.length / G.length) + "% win rate")] : []));
   $("games-count").textContent = D.games ? G.length + " match(es) since " + fmtDate(D.games_since) : "";
-  $("games-note").textContent = "From OpenDota, since the seed start. A win only counts if the hero is unlocked"
-    + " and you ran /parse_recent_match in the client before your next match: it only reads the most recent one."
-    + " \"Read by the client\" is deduced from the checks done on the server (hover the cell for details).";
   const body = $("game-rows"); body.replaceChildren();
   [...G].reverse().forEach(g => {
     const tr = el("tr", g.open ? "" : "locked");
